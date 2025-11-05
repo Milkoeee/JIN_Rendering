@@ -1,0 +1,170 @@
+#pragma kernel CSMainInit
+#pragma kernel CSMainInitRGB
+#pragma kernel CSMainLoop       MAIN_LOOP_CS=CSMainLoop
+#pragma kernel CSMainLoopRGB    MAIN_LOOP_CS=CSMainLoopRGB  DO_RGB=1
+
+// A single iteration of Bob Jenkins' One-At-A-Time hashing algorithm.
+uint JenkinsHash(uint x)
+{
+    x += (x << 10u);
+    x ^= (x >> 6u);
+    x += (x << 3u);
+    x ^= (x >> 11u);
+    x += (x << 15u);
+    return x;
+}
+
+// Compound versions of the hashing algorithm.
+uint JenkinsHash(uint2 v)
+{
+    return JenkinsHash(v.x ^ JenkinsHash(v.y));
+}
+
+uint JenkinsHash(uint3 v)
+{
+    return JenkinsHash(v.x ^ JenkinsHash(v.yz));
+}
+
+float ConstructFloat(int m)
+{
+    const int ieeeMantissa = 0x007FFFFF; // Binary FP32 mantissa bitmask
+    const int ieeeOne = 0x3F800000; // 1.0 in FP32 IEEE
+
+    m &= ieeeMantissa; // Keep only mantissa bits (fractional part)
+    m |= ieeeOne; // Add fractional part to 1.0
+
+    float f = asfloat(m); // Range [1, 2)
+    return f - 1; // Range [0, 1)
+}
+
+float ConstructFloat(uint m)
+{
+    return ConstructFloat(asint(m));
+}
+
+float GenerateHashedRandomFloat(uint2 v)
+{
+    return ConstructFloat(JenkinsHash(v));
+}
+float GenerateHashedRandomFloat(uint3 v)
+{
+    return ConstructFloat(JenkinsHash(v));
+}
+
+  Texture2D<float4> Input;
+RWTexture2D<float4> Output;
+
+int2 TextureSize;
+
+float Sparcity;
+
+[numthreads(8, 8, 1)]
+void CSMainInitRGB(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id.xy >= (uint2)TextureSize))
+        return;
+
+    float3 rnd;
+    rnd.r = GenerateHashedRandomFloat(uint3(id.xy, 0));
+    rnd.g = GenerateHashedRandomFloat(uint3(id.xy, 1));
+    rnd.b = GenerateHashedRandomFloat(uint3(id.xy, 2));
+    float3 value;
+    value.r = rnd.r > Sparcity ? 1.0 : 0.0;
+    value.g = rnd.g > Sparcity ? 1.0 : 0.0;
+    value.b = rnd.b > Sparcity ? 1.0 : 0.0;
+    Output[id.xy] = float4(value, 0.0);
+}
+
+[numthreads(8, 8, 1)]
+void CSMainInit(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id.xy >= (uint2)TextureSize))
+        return;
+
+    float rnd;
+    rnd.r = GenerateHashedRandomFloat(id.xy);
+    float value;
+    value = rnd > Sparcity ? 1.0 : 0.0;
+    Output[id.xy] = float4(value.xxx, 0.0);
+}
+
+float GameOfLife(float cur, float sum)
+{
+    if (cur == 1.0f)
+    {
+        if (sum == 2 || sum == 3)
+            return 1.0f;
+        else
+            return 0.0f;
+    }
+    else
+    {
+        if (sum == 3)
+            return 1.0f;
+        else
+            return 0.0f;
+    }
+}
+
+uint LoopDim(int k, uint max_dim)
+{
+    int kk = k;
+
+    if (kk < 0)
+        kk = (int)max_dim - 1;
+    else if (kk >= (int)max_dim)
+        kk = 0;
+
+    return (uint) kk;
+}
+
+[numthreads(8, 8, 1)]
+void MAIN_LOOP_CS(uint3 uid : SV_DispatchThreadID)
+{
+    if (any(uid.xy >= (uint2)TextureSize))
+        return;
+
+    int2 id = (int2)uid.xy;
+
+    uint x_neg = LoopDim(id.x - 1, TextureSize.x);
+    uint x_pos = LoopDim(id.x + 1, TextureSize.x);
+
+    uint y_neg = LoopDim(id.y - 1, TextureSize.y);
+    uint y_pos = LoopDim(id.y + 1, TextureSize.y);
+
+#if DO_RGB
+    #define MATH_TYPE   float3
+    #define SWIZZLE     .rgb
+#else
+    #define MATH_TYPE   float
+    #define SWIZZLE     .r
+#endif
+
+    MATH_TYPE x00 = Input[uint2(x_neg, y_neg)] SWIZZLE;
+    MATH_TYPE x10 = Input[uint2(uid.x, y_neg)] SWIZZLE;
+    MATH_TYPE x20 = Input[uint2(x_pos, y_neg)] SWIZZLE;
+    MATH_TYPE x01 = Input[uint2(x_neg, uid.y)] SWIZZLE;
+    MATH_TYPE cur = Input[uid.xy] SWIZZLE;
+    MATH_TYPE x21 = Input[uint2(x_pos, uid.y)] SWIZZLE;
+    MATH_TYPE x02 = Input[uint2(x_neg, y_pos)] SWIZZLE;
+    MATH_TYPE x12 = Input[uint2(uid.x, y_pos)] SWIZZLE;
+    MATH_TYPE x22 = Input[uint2(x_pos, y_pos)] SWIZZLE;
+
+    MATH_TYPE sum = x00 + x10 + x20 +
+                    x01       + x21 +
+                    x02 + x12 + x22;
+
+    MATH_TYPE out_value;
+    
+#if DO_RGB
+    out_value.r = GameOfLife(cur.r, sum.r);
+    out_value.g = GameOfLife(cur.g, sum.g);
+    out_value.b = GameOfLife(cur.b, sum.b);
+
+    Output[uid.xy] = float4(out_value, 0.0f);
+#else
+    out_value = GameOfLife(cur, sum);
+
+    Output[uid.xy] = float4(out_value.rrr, 0.0f);
+#endif
+}

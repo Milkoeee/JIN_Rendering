@@ -1,0 +1,36 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+Texture2D<float4> Input;
+RWTexture2D<float4> Output;
+
+uint2 TextureSize;
+uint Radius;
+
+#define WAVE_SIZE 8
+#define MAX_RADIUS 64
+
+groupshared float3 cache_line[2*MAX_RADIUS + WAVE_SIZE];
+
+[numthreads(WAVE_SIZE,1,1)]
+void CSMain (uint3 id : SV_DispatchThreadID, uint3 gid: SV_GroupThreadID)
+{
+    uint groupSize = gid.x * (2*Radius + WAVE_SIZE + WAVE_SIZE - 1)/WAVE_SIZE;
+    for (int i=0; i<WAVE_SIZE; i++) 
+    {
+        if (groupSize+i < 2*MAX_RADIUS + WAVE_SIZE)
+        cache_line[groupSize + i] = Input[uint2(id.x-Radius + gid.x * WAVE_SIZE + i, id.y)].rgb;
+    }
+    
+    GroupMemoryBarrierWithGroupSync();
+    float3 sum = 0;
+    for (uint j=0; j<2*Radius + WAVE_SIZE; j++) 
+    {
+        sum += cache_line[j]/(2*Radius + WAVE_SIZE);
+    }
+
+    Output[id.xy] = float4(sum.rgb, 1.0f);
+    //Output[id.xy] = Input[id.xy];
+}
